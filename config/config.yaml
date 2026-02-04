@@ -1,0 +1,5 @@
+conda-channel-priority: "strict"
+
+#min_nfeature: 200
+#min_ncount: 500
+#max_mtdna: 5

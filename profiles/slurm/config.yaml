@@ -1,0 +1,10 @@
+use-singularity: True
+singularity-args: "\"--nv\""
+
+set-threads:
+    bootstrap_clusters: 1
+set-resources:
+    bootstrap_clusters:
+        nodes: 1
+        tasks: 1
+        cpus_per_task: 1

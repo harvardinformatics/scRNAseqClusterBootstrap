@@ -1,0 +1,11 @@
+
+SAMPLES = glob_wildcards("seurat_objects/{sample}.rds").sample
+print(SAMPLES)
+
+rule all:
+    input:
+        expand("results/{sample}_clusterbootstraps.tsv", sample=SAMPLES)
+        
+    default_target: True
+
+include: "rules/bootstrap_clusters.smk"
