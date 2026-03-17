@@ -87,9 +87,11 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
   jaccard_df <- type.convert(jaccard_df, as.is = TRUE)
 
   jaccard_df$name1 <- factor(jaccard_df$name1,
-                             levels = sort(unique(jaccard_df$name1)))
+    levels = sort(unique(jaccard_df$name1))
+  )
   jaccard_df$name2 <- factor(jaccard_df$name2,
-                             levels = sort(unique(jaccard_df$name2)))
+    levels = sort(unique(jaccard_df$name2))
+  )
   jaccard_tibble <- tibble::as_tibble(jaccard_df)
 
   stable_cluster_count <- jaccard_tibble %>%
@@ -111,7 +113,8 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
 
   boot_stable_merged <- dplyr::bind_rows(bootstrap1_summary, bootstrap2_summary) %>%
     dplyr::mutate(method = factor(method,
-                                  levels = c("n_stable_name1", "n_stable_name2")))
+      levels = c("n_stable_name1", "n_stable_name2")
+    ))
 
   method_colors <- c(
     n_stable_name1 = "forestgreen",
@@ -124,7 +127,8 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
   label_y <- -max(1, max_y) * 0.08
   label_data <- tibble::tibble(
     method = factor(c("n_stable_name1", "n_stable_name2"),
-                    levels = c("n_stable_name1", "n_stable_name2")),
+      levels = c("n_stable_name1", "n_stable_name2")
+    ),
     x_pos = c(1.08, 1.92),
     y_pos = c(label_y * 0.85, label_y * 1.25),
     label = c(label1, label2)
@@ -135,7 +139,8 @@ MakeInterVsIntraStablePlot <- function(meta1, meta2,
     ggplot2::geom_hline(yintercept = -0.5, color = "black", linewidth = 0.5) +
     ggplot2::geom_violin(width = 0.7, trim = FALSE, alpha = 0.35, linewidth = 0.9) +
     ggplot2::geom_hline(yintercept = stable_cluster_count,
-                        color = "black", linetype = "dashed", linewidth = 1) +
+      color = "black", linetype = "dashed", linewidth = 1
+    ) +
     ggplot2::annotate(
       "text",
       x = 1.5,
@@ -235,10 +240,128 @@ read_bootstrap_tsv <- function(tsv_path) {
     standardize_bootstrap_cols()
 }
 
+extract_feature_table <- function(obj, assay_name) {
+  assay_obj <- obj[[assay_name]]
+  feature_ids <- rownames(SeuratObject::GetAssayData(obj, assay = assay_name, layer = "counts"))
+  assay_symbols <- row.names(assay_obj)
+
+  gene_symbols <- if (
+    !is.null(assay_symbols) &&
+    length(assay_symbols) == length(feature_ids)
+  ) {
+    assay_symbols
+  } else {
+    feature_ids
+  }
+
+  tibble::tibble(
+    feature_id = feature_ids,
+    gene_symbol = gene_symbols
+  )
+}
+
+select_expression_assay <- function(obj) {
+  assay_names <- names(obj@assays)
+
+  if ("RNA" %in% assay_names) {
+    return("RNA")
+  }
+
+  SeuratObject::DefaultAssay(obj)
+}
+
+read_method_bundle <- function(rds_path, boot_path) {
+  obj <- readRDS(rds_path)
+
+  if (!inherits(obj, "Seurat")) {
+    stop("RDS is not a Seurat object: ", basename(rds_path))
+  }
+
+  if (!("seurat_clusters" %in% colnames(obj@meta.data))) {
+    stop("Missing `seurat_clusters` in Seurat metadata: ", basename(rds_path))
+  }
+
+  assay_name <- select_expression_assay(obj)
+  counts <- SeuratObject::GetAssayData(obj, assay = assay_name, layer = "counts")
+  lib_size <- Matrix::colSums(counts)
+  feature_table <- extract_feature_table(obj, assay_name)
+
+  list(
+    label = stringr::str_remove(basename(rds_path), "\\.rds$"),
+    rds = rds_path,
+    boot = boot_path,
+    assay = assay_name,
+    meta = obj@meta.data,
+    bootstraps = read_bootstrap_tsv(boot_path),
+    counts = counts,
+    lib_size = lib_size,
+    barcodes = colnames(counts),
+    features = rownames(counts),
+    feature_table = feature_table
+  )
+}
+
+resolve_feature_id <- function(method, gene_symbol) {
+  match_tbl <- method$feature_table %>%
+    dplyr::filter(.data$gene_symbol == .env$gene_symbol)
+
+  if (nrow(match_tbl) == 0) {
+    return(NULL)
+  }
+
+  match_tbl$feature_id[[1]]
+}
+
+make_expression_heatmap_data <- function(method_data, gene_symbol) {
+  barcode_union <- sort(unique(unlist(purrr::map(method_data, "barcodes"))))
+
+  purrr::map_dfr(method_data, function(method) {
+    values <- rep(NA_real_, length(barcode_union))
+    names(values) <- barcode_union
+
+    feature_id <- resolve_feature_id(method, gene_symbol)
+
+    if (!is.null(feature_id)) {
+      gene_counts <- as.numeric(method$counts[feature_id, , drop = TRUE])
+      normalized <- log1p((gene_counts / pmax(method$lib_size, 1)) * 10000)
+      values[method$barcodes] <- normalized
+    }
+
+    tibble::tibble(
+      method = method$label,
+      barcode = factor(barcode_union, levels = barcode_union),
+      expression = values
+    )
+  }) %>%
+    dplyr::mutate(
+      method = factor(method, levels = purrr::map_chr(method_data, "label"))
+    )
+}
+
+make_expression_heatmap_plot <- function(plot_data, gene_symbol) {
+  ggplot2::ggplot(plot_data, ggplot2::aes(x = barcode, y = method, fill = expression)) +
+    ggplot2::geom_raster() +
+    ggplot2::scale_fill_viridis_c(
+      option = "C",
+      na.value = "black",
+      name = "log1p(norm counts)"
+    ) +
+    ggplot2::labs(
+      title = paste("Per-method expression heatmap for", gene_symbol),
+      x = "Cell barcode",
+      y = "Method"
+    ) +
+    ggplot2::theme_minimal(base_size = 12) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank(),
+      panel.grid = ggplot2::element_blank()
+    )
+}
+
 ui <- fluidPage(
   tags$head(
     tags$style(HTML("
-      /* Make method labels responsive to viewport width */
       .selectize-control.single .selectize-input,
       .selectize-dropdown .option {
         font-size: clamp(9px, 0.95vw, 12px);
@@ -248,20 +371,47 @@ ui <- fluidPage(
       }
     "))
   ),
-  titlePanel("Inter-method vs bootstrap cluster stability"),
-  sidebarLayout(
-    sidebarPanel(
-      width = 5,
-      helpText("Select two methods (.rds) with matching _bootstraps.tsv files."),
-      selectInput("method1", "Method 1", choices = NULL),
-      selectInput("method2", "Method 2", choices = NULL),
-      numericInput("threshold", "Minimum Jaccard threshold", value = 0.6, min = 0, max = 1, step = 0.01),
-      actionButton("refresh", "Refresh file list")
+  titlePanel("scRNA-seq method comparison"),
+  tabsetPanel(
+    id = "analysis_tabs",
+    tabPanel(
+      "Cluster stability",
+      sidebarLayout(
+        sidebarPanel(
+          width = 5,
+          helpText("Select two methods (.rds) with matching bootstrap TSV files."),
+          selectInput("method1", "Method 1", choices = NULL),
+          selectInput("method2", "Method 2", choices = NULL),
+          numericInput("threshold", "Minimum Jaccard threshold", value = 0.6, min = 0, max = 1, step = 0.01),
+          actionButton("refresh", "Refresh file list")
+        ),
+        mainPanel(
+          width = 7,
+          plotOutput("stability_plot", height = "500px"),
+          verbatimTextOutput("status")
+        )
+      )
     ),
-    mainPanel(
-      width = 7,
-      plotOutput("stability_plot", height = "500px"),
-      verbatimTextOutput("status")
+    tabPanel(
+      "Gene heatmap",
+      sidebarLayout(
+        sidebarPanel(
+          width = 4,
+          helpText("Choose a gene to compare log-normalized expression across all methods and the union of all cell barcodes."),
+          shiny::tagAppendAttributes(
+            textInput("heatmap_gene", "Gene symbol", value = ""),
+            list = "gene-symbol-options",
+            autocomplete = "off"
+          ),
+          uiOutput("gene_symbol_datalist"),
+          actionButton("refresh_heatmap", "Refresh gene list")
+        ),
+        mainPanel(
+          width = 8,
+          plotOutput("expression_heatmap", height = "420px"),
+          verbatimTextOutput("heatmap_status")
+        )
+      )
     )
   )
 )
@@ -275,9 +425,28 @@ server <- function(input, output, session) {
 
     if (nrow(pairs) > 0) {
       choice_map <- stats::setNames(pairs$rds, pairs$label)
-      updateSelectInput(session, "method1", choices = choice_map, selected = pairs$rds[[1]])
-      second_idx <- if (nrow(pairs) >= 2) 2 else 1
-      updateSelectInput(session, "method2", choices = choice_map, selected = pairs$rds[[second_idx]])
+      current_method1 <- isolate(input$method1)
+      current_method2 <- isolate(input$method2)
+
+      selected_method1 <- if (!is.null(current_method1) && current_method1 %in% pairs$rds) {
+        current_method1
+      } else {
+        pairs$rds[[1]]
+      }
+
+      fallback_method2 <- if (nrow(pairs) >= 2) pairs$rds[[2]] else pairs$rds[[1]]
+      selected_method2 <- if (!is.null(current_method2) && current_method2 %in% pairs$rds) {
+        current_method2
+      } else {
+        fallback_method2
+      }
+
+      if (identical(selected_method1, selected_method2) && nrow(pairs) >= 2) {
+        selected_method2 <- pairs$rds[[which(pairs$rds != selected_method1)[1]]]
+      }
+
+      updateSelectInput(session, "method1", choices = choice_map, selected = selected_method1)
+      updateSelectInput(session, "method2", choices = choice_map, selected = selected_method2)
     } else {
       updateSelectInput(session, "method1", choices = c())
       updateSelectInput(session, "method2", choices = c())
@@ -285,6 +454,14 @@ server <- function(input, output, session) {
   }
 
   observeEvent(input$refresh, refresh_choices(), ignoreInit = TRUE)
+  observeEvent(input$refresh_heatmap, {
+    current_gene <- isolate(input$heatmap_gene)
+    method_pairs(find_method_pairs("data"))
+
+    if (!is.null(current_gene) && nzchar(current_gene)) {
+      updateTextInput(session, "heatmap_gene", value = current_gene)
+    }
+  }, ignoreInit = TRUE)
   observe(refresh_choices())
 
   loaded_data <- reactive({
@@ -314,6 +491,43 @@ server <- function(input, output, session) {
     )
   })
 
+  all_method_data <- reactive({
+    pairs <- method_pairs()
+
+    validate(
+      need(nrow(pairs) > 0, "No valid method pairs found in ./data.")
+    )
+
+    purrr::map2(pairs$rds, pairs$boot, read_method_bundle)
+  })
+
+  output$gene_symbol_datalist <- renderUI({
+    methods <- all_method_data()
+    gene_choices <- methods %>%
+      purrr::map("feature_table") %>%
+      dplyr::bind_rows() %>%
+      dplyr::distinct(gene_symbol) %>%
+      dplyr::arrange(gene_symbol) %>%
+      dplyr::pull(gene_symbol)
+
+    tags$datalist(
+      id = "gene-symbol-options",
+      lapply(gene_choices, function(gene) {
+        tags$option(value = gene)
+      })
+    )
+  })
+
+  heatmap_data <- reactive({
+    methods <- all_method_data()
+    req(input$heatmap_gene)
+    validate(
+      need(nzchar(input$heatmap_gene), "Type a gene symbol to draw the heatmap.")
+    )
+
+    make_expression_heatmap_data(methods, input$heatmap_gene)
+  })
+
   output$stability_plot <- renderPlot({
     dat <- loaded_data()
 
@@ -328,14 +542,40 @@ server <- function(input, output, session) {
     )
   })
 
+  output$expression_heatmap <- renderPlot({
+    plot_data <- heatmap_data()
+    validate(
+      need(nrow(plot_data) > 0, "No heatmap data available for the selected gene."),
+      need(any(!is.na(plot_data$expression)), "Selected gene symbol was not found in the loaded methods.")
+    )
+
+    make_expression_heatmap_plot(plot_data, input$heatmap_gene)
+  }, res = 110)
+
   output$status <- renderText({
     pairs <- method_pairs()
 
     if (nrow(pairs) == 0) {
-      return("No valid method pairs found in ./data. Expected .rds plus matching _bootstraps.tsv file.")
+      return("No valid method pairs found in ./data. Expected .rds plus matching bootstrap TSV file.")
     }
 
     paste0("Detected ", nrow(pairs), " method file pairs in ./data")
+  })
+
+  output$heatmap_status <- renderText({
+    methods <- all_method_data()
+    barcode_union <- sort(unique(unlist(purrr::map(methods, "barcodes"))))
+    feature_union <- methods %>%
+      purrr::map("feature_table") %>%
+      dplyr::bind_rows() %>%
+      dplyr::distinct(gene_symbol) %>%
+      nrow()
+
+    paste0(
+      "Loaded ", length(methods), " methods. Heatmap rows are methods, columns are the union of ",
+      length(barcode_union), " cell barcodes, and gene choices cover ",
+      feature_union, " gene symbols."
+    )
   })
 }
 
