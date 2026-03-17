@@ -318,6 +318,8 @@ make_expression_heatmap_data <- function(method_data, gene_symbol) {
   purrr::map_dfr(method_data, function(method) {
     values <- rep(NA_real_, length(barcode_union))
     names(values) <- barcode_union
+    barcode_present <- barcode_union %in% method$barcodes
+    cell_status <- ifelse(barcode_present, "expression_missing", "barcode_missing")
 
     feature_id <- resolve_feature_id(method, gene_symbol)
 
@@ -325,12 +327,17 @@ make_expression_heatmap_data <- function(method_data, gene_symbol) {
       gene_counts <- as.numeric(method$counts[feature_id, , drop = TRUE])
       normalized <- log1p((gene_counts / pmax(method$lib_size, 1)) * 10000)
       values[method$barcodes] <- normalized
+      cell_status[barcode_present] <- "expression_present"
     }
 
     tibble::tibble(
       method = method$label,
       barcode = factor(barcode_union, levels = barcode_union),
-      expression = values
+      expression = values,
+      cell_status = factor(
+        cell_status,
+        levels = c("barcode_missing", "expression_missing", "expression_present")
+      )
     )
   }) %>%
     dplyr::mutate(
@@ -339,12 +346,44 @@ make_expression_heatmap_data <- function(method_data, gene_symbol) {
 }
 
 make_expression_heatmap_plot <- function(plot_data, gene_symbol) {
+  legend_data <- tibble::tibble(
+    status_label = c("Barcode missing", "Expression missing/undefined"),
+    x = levels(plot_data$barcode)[1],
+    y = levels(plot_data$method)[1]
+  )
+
   ggplot2::ggplot(plot_data, ggplot2::aes(x = barcode, y = method, fill = expression)) +
-    ggplot2::geom_raster() +
+    ggplot2::geom_tile() +
     ggplot2::scale_fill_viridis_c(
       option = "C",
-      na.value = "black",
+      na.value = "transparent",
       name = "log1p(norm counts)"
+    ) +
+    ggplot2::geom_tile(
+      data = dplyr::filter(plot_data, cell_status == "barcode_missing"),
+      fill = "white",
+      inherit.aes = FALSE,
+      ggplot2::aes(x = barcode, y = method)
+    ) +
+    ggplot2::geom_tile(
+      data = dplyr::filter(plot_data, cell_status == "expression_missing"),
+      fill = "gray75",
+      inherit.aes = FALSE,
+      ggplot2::aes(x = barcode, y = method)
+    ) +
+    ggplot2::geom_point(
+      data = legend_data,
+      ggplot2::aes(x = x, y = y, color = status_label),
+      inherit.aes = FALSE,
+      alpha = 0,
+      show.legend = TRUE
+    ) +
+    ggplot2::scale_color_manual(
+      values = c(
+        "Barcode missing" = "white",
+        "Expression missing/undefined" = "gray75"
+      ),
+      name = "Cell status"
     ) +
     ggplot2::labs(
       title = paste("Per-method expression heatmap for", gene_symbol),
@@ -355,7 +394,15 @@ make_expression_heatmap_plot <- function(plot_data, gene_symbol) {
     ggplot2::theme(
       axis.text.x = ggplot2::element_blank(),
       axis.ticks.x = ggplot2::element_blank(),
-      panel.grid = ggplot2::element_blank()
+      panel.grid = ggplot2::element_blank(),
+      legend.key = ggplot2::element_rect(fill = "white", color = "gray85")
+    ) +
+    ggplot2::guides(
+      color = ggplot2::guide_legend(
+        order = 2,
+        override.aes = list(alpha = 1, shape = 22, size = 5, fill = c("white", "gray75"))
+      ),
+      fill = ggplot2::guide_colorbar(order = 1)
     )
 }
 
